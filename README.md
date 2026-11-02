@@ -1,18 +1,160 @@
-# EDITH Middleware
+# 🤖 EDITH Middleware
 
 Cross-platform PlatformIO project for the ESP32-S3 firmware of EDITH. Drives a 128x64 SH1106 OLED with eight expressions, blinking and smooth dissolve transitions. Supports local HTTP control and outward authenticated polling of the companion backend.
 
 Build and upload from Windows 11 or Linux, including CachyOS/KDE. PlatformIO downloads the compiler for the host operating system; the firmware still runs on the same ESP32. No Windows drive letters or COM ports are hardcoded in the project.
 
-## Hardware
+## 🔧 Hardware
 
 - ESP32-S3 board configured in `platformio.ini`
 - SH1106 128x64 I2C OLED
 - SDA: GPIO 8; SCL: GPIO 9
 
-Match your board's flash/PSRAM specifications to `platformio.ini`; different ESP32-S3 boards have different memory. The configuration has been built and used with the author's hardware on Windows. Linux build/upload still needs verification on the laptop.
+Match your board's flash/PSRAM specifications to `platformio.ini`; different ESP32-S3 boards have different memory. Build, upload and local polling have been verified on Windows with the ESP32. Linux build/upload still needs hardware verification.
 
-## 1. Prerequisites
+## 🚀 Quick start
+
+**You need:** [Git](https://git-scm.com/downloads), [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode), an ESP32-S3 and a data-capable USB cable.
+
+### 1. Clone the project — Windows or Linux
+
+Run these commands wherever you want to keep the project:
+
+```bash
+git clone https://github.com/QZainSami/edith-middleware.git
+cd edith-middleware
+```
+
+Open the cloned folder in VS Code. PlatformIO will detect `platformio.ini` and download the tools it needs.
+
+### 2. Create your settings file
+
+**Windows PowerShell:**
+
+```powershell
+Copy-Item include/edith_config.example.h include/edith_config.h
+```
+
+**Linux / CachyOS:**
+
+```bash
+cp include/edith_config.example.h include/edith_config.h
+```
+
+Do this once. Keep an existing `include/edith_config.h` when updating.
+
+### 3. Enter your Wi-Fi details
+
+Edit `include/edith_config.h` and set `WIFI_SSID` and `WIFI_PASSWORD`. For the first local HTTP test, keep:
+
+```cpp
+#define EDITH_CLOUD_ENABLED 0
+#define EDITH_ALLOW_HTTP_TEST 0
+```
+
+🔒 This file is ignored by Git. Never commit Wi-Fi passwords or device tokens.
+
+### 4. Build and upload
+
+Connect the ESP32. In PlatformIO, click **Build**, then **Upload**, then **Serial Monitor** (115200 baud). The monitor shows the device's IP address.
+
+Prefer the terminal? Use the commands below in a PlatformIO terminal.
+
+## ⌨️ Terminal commands — Windows and Linux
+
+From this repository root:
+
+```text
+pio run
+pio device list
+pio run --target upload
+pio device monitor --baud 115200
+```
+
+The first build downloads the platform, host compiler and U8g2 library. Upload only to your intended connected board. Close any other serial monitor first; Ctrl+C exits the CLI monitor. If PlatformIO cannot auto-detect the port, use the actual port from `pio device list`:
+
+**Windows example:**
+
+```powershell
+pio run --target upload --upload-port COM5
+pio device monitor --port COM5 --baud 115200
+```
+
+**Linux example:**
+
+```bash
+pio run --target upload --upload-port /dev/ttyACM0
+pio device monitor --port /dev/ttyACM0 --baud 115200
+```
+
+These are examples, not fixed port assignments; Linux may use `/dev/ttyUSB0`. If the board needs download mode, hold BOOT while starting upload and follow your board's reset procedure. Use a data-capable USB cable.
+
+In VS Code, open this repository folder so PlatformIO finds `platformio.ini`, then use its Build and Upload actions. The same source files and project configuration are used on both systems.
+
+## 🎭 Control the faces
+
+The serial monitor reports the device's IP. Open that IP in your browser:
+
+- `GET /`: device control page.
+- `GET /status`: current mood and animation status.
+- `GET /mood?name=happy`: start a face transition.
+
+Supported moods: `normal`, `happy`, `sad`, `angry`, `sleepy`, `curious`, `thinking`, `uwu`.
+
+Local HTTP controls have no authentication and are for trusted LAN use only. Never expose the ESP32's local web server directly to the internet.
+
+## 📡 Connect to the backend with polling
+
+Set these values in your private `include/edith_config.h` to match the backend:
+
+```cpp
+#define EDITH_CLOUD_ENABLED 1
+#define EDITH_ALLOW_HTTP_TEST 1
+static const char *EDITH_SERVER_URL = "http://YOUR_BACKEND_LAN_IP:8000";
+static const char *EDITH_DEVICE_TOKEN = "YOUR_MATCHING_DEVICE_TOKEN";
+```
+
+Edit the existing declarations rather than adding duplicate ones. The backend must use `DEVICE_TRANSPORT=poll` with the same device token (at least 32 characters), and listen on `0.0.0.0:8000`. Use the backend computer's reachable LAN IP. On Linux find it with `ip -4 address` / `ip route`; on Windows use `ipconfig`. `127.0.0.1` on the ESP32 refers to the ESP32 itself, not the laptop or home PC. Moving the backend to Linux may change its IP, so rebuild/upload after updating this URL.
+
+The local ESP32 web server is disabled by default in cloud/polling mode. Use the backend's chat page instead. Network requests run in a background task; rendering stays in the main loop. Acknowledgements are reported after transitions complete. Latest-command delivery, expiry and reconnect backoff are implemented. Local polling has been verified on Windows with the ESP32; hosted HTTPS/hotspot use is not yet verified.
+
+For real hosting, set `EDITH_ALLOW_HTTP_TEST=0`, use an HTTPS origin, install the correct trusted root CA in `EDITH_ROOT_CA`, and synchronize the clock. Never replace certificate verification with an insecure bypass. See [HOSTED_CONNECTION.md](HOSTED_CONNECTION.md) and the backend's HOSTING.md.
+
+## 🐧 Linux USB access
+
+<details>
+<summary>Board detected but upload says permission denied? Start here.</summary>
+
+If PlatformIO cannot access the serial device, install the official PlatformIO udev rules:
+
+```bash
+curl -fsSLo /tmp/99-platformio-udev.rules https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules
+sudo install -m 644 /tmp/99-platformio-udev.rules /etc/udev/rules.d/99-platformio-udev.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Unplug and reconnect the board. Use `pio device list` to identify it. If permission errors remain, check the actual port's group, for example:
+
+```bash
+ls -l /dev/ttyACM0
+id
+```
+
+CachyOS/Arch commonly uses `uucp`. Only if the device is owned by that group, add your user:
+
+```bash
+sudo usermod -aG uucp "$USER"
+```
+
+Log out of KDE and back in for group changes to take effect. If the device is owned by a different group, use that group instead. Do not use `sudo pio` or make all serial devices world-writable. See the official [PlatformIO permissions guide](https://docs.platformio.org/en/stable/core/installation/udev-rules.html).
+
+</details>
+
+## 🛠️ Standalone PlatformIO CLI (optional)
+
+<details>
+<summary>Use PlatformIO without the VS Code extension</summary>
 
 Install Git, VS Code and its PlatformIO IDE extension. The extension manages PlatformIO Core and provides Build, Upload and Serial Monitor buttons on Windows and Linux. If using that extension, its PlatformIO terminal already provides `pio`; skip the standalone CLI installation below.
 
@@ -51,124 +193,9 @@ uv tool update-shell
 
 Reopen the terminal again and check `pio --version`. Do not run PlatformIO as root. Alternatively use the PlatformIO IDE extension's managed terminal instead of installing a second copy.
 
-## 2. Clone and configure
+</details>
 
-### Windows — PowerShell
-
-```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\Documents\Uni\EDITH" | Out-Null
-Set-Location "$env:USERPROFILE\Documents\Uni\EDITH"
-git clone https://github.com/QZainSami/edith-middleware.git "EDITH Middleware"
-Set-Location "EDITH Middleware"
-Copy-Item include/edith_config.example.h include/edith_config.h
-```
-
-### Linux / CachyOS
-
-```bash
-mkdir -p ~/Documents/Uni/EDITH
-cd ~/Documents/Uni/EDITH
-git clone https://github.com/QZainSami/edith-middleware.git "EDITH Middleware"
-cd "EDITH Middleware"
-cp include/edith_config.example.h include/edith_config.h
-```
-
-Copy the example only on first setup. Keep an existing `include/edith_config.h`; do not overwrite working credentials. Edit that private file and enter your Wi-Fi SSID and password. For the first local HTTP test keep:
-
-```cpp
-#define EDITH_CLOUD_ENABLED 0
-#define EDITH_ALLOW_HTTP_TEST 0
-```
-
-The private config is ignored by Git. Create it separately on each computer, or transfer it securely if reusing the same device credentials. Do not copy `.pio`, compiler packages, or `.vscode` caches from Windows to Linux.
-
-## 3. Linux USB permissions
-
-If PlatformIO cannot access the serial device, install the official PlatformIO udev rules:
-
-```bash
-curl -fsSLo /tmp/99-platformio-udev.rules https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules
-sudo install -m 644 /tmp/99-platformio-udev.rules /etc/udev/rules.d/99-platformio-udev.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-Unplug and reconnect the board. Use `pio device list` to identify it. If permission errors remain, check the actual port's group, for example:
-
-```bash
-ls -l /dev/ttyACM0
-id
-```
-
-CachyOS/Arch commonly uses `uucp`. Only if the device is owned by that group, add your user:
-
-```bash
-sudo usermod -aG uucp "$USER"
-```
-
-Log out of KDE and back in for group changes to take effect. If the device is owned by a different group, use that group instead. Do not use `sudo pio` or make all serial devices world-writable. See the official [PlatformIO permissions guide](https://docs.platformio.org/en/stable/core/installation/udev-rules.html).
-
-## 4. Build, upload and monitor — both systems
-
-From this repository root:
-
-```text
-pio run
-pio device list
-pio run --target upload
-pio device monitor --baud 115200
-```
-
-The first build downloads the platform, host compiler and U8g2 library. Upload only to your intended connected board. Close any other serial monitor first; Ctrl+C exits the CLI monitor. If PlatformIO cannot auto-detect the port, use the actual port from `pio device list`:
-
-**Windows example:**
-
-```powershell
-pio run --target upload --upload-port COM5
-pio device monitor --port COM5 --baud 115200
-```
-
-**Linux example:**
-
-```bash
-pio run --target upload --upload-port /dev/ttyACM0
-pio device monitor --port /dev/ttyACM0 --baud 115200
-```
-
-These are examples, not fixed port assignments; Linux may use `/dev/ttyUSB0`. If the board needs download mode, hold BOOT while starting upload and follow your board's reset procedure. Use a data-capable USB cable.
-
-In VS Code, open this repository folder so PlatformIO finds `platformio.ini`, then use its Build and Upload actions. The same source files and project configuration are used on both systems.
-
-## Local HTTP control
-
-The serial monitor reports the device's IP. Open that IP in your browser:
-
-- `GET /`: device control page.
-- `GET /status`: current mood and animation status.
-- `GET /mood?name=happy`: start a face transition.
-
-Supported moods: `normal`, `happy`, `sad`, `angry`, `sleepy`, `curious`, `thinking`, `uwu`.
-
-Local HTTP controls have no authentication and are for trusted LAN use only. Never expose the ESP32's local web server directly to the internet.
-
-## Backend polling mode — Windows or Linux host
-
-Set these values in your private `include/edith_config.h` to match the backend:
-
-```cpp
-#define EDITH_CLOUD_ENABLED 1
-#define EDITH_ALLOW_HTTP_TEST 1
-static const char *EDITH_SERVER_URL = "http://YOUR_BACKEND_LAN_IP:8000";
-static const char *EDITH_DEVICE_TOKEN = "YOUR_MATCHING_DEVICE_TOKEN";
-```
-
-Edit the existing declarations rather than adding duplicate ones. The backend must use `DEVICE_TRANSPORT=poll` with the same device token (at least 32 characters), and listen on `0.0.0.0:8000`. Use the backend computer's reachable LAN IP. On Linux find it with `ip -4 address` / `ip route`; on Windows use `ipconfig`. `127.0.0.1` on the ESP32 refers to the ESP32 itself, not the laptop or home PC. Moving the backend to Linux may change its IP, so rebuild/upload after updating this URL.
-
-The local ESP32 web server is disabled by default in cloud/polling mode. Use the backend's chat page instead. Network requests run in a background task; rendering stays in the main loop. Acknowledgements are reported after transitions complete. Latest-command delivery, expiry and reconnect backoff are implemented. The home-LAN polling test has passed on the author's Windows/ESP32 setup; hosted HTTPS/hotspot use is not yet verified.
-
-For real hosting, set `EDITH_ALLOW_HTTP_TEST=0`, use an HTTPS origin, install the correct trusted root CA in `EDITH_ROOT_CA`, and synchronize the clock. Never replace certificate verification with an insecure bypass. See [HOSTED_CONNECTION.md](HOSTED_CONNECTION.md) and the backend's HOSTING.md.
-
-## Moving between computers
+## 💻 Work on another computer
 
 Before switching computers, commit and push source changes. On the other computer:
 
@@ -179,7 +206,7 @@ pio run
 
 Resolve local edits before pulling; do not force-reset work. Private configuration files stay local and are not cloned. PlatformIO regenerates the operating system's build files. If build output becomes stale, use `pio run --target clean` and build again.
 
-## Planned features and related projects
+## 🗺️ Planned features and related projects
 
 Touch reactions, sound cues, wake word "EDITH", speech input/output, a companion app and a speaking-mouth animation are planned, not implemented here.
 
@@ -188,6 +215,6 @@ Touch reactions, sound cues, wake word "EDITH", speech input/output, a companion
 - [uv installation](https://docs.astral.sh/uv/getting-started/installation/)
 - [uv tool environments](https://docs.astral.sh/uv/concepts/tools/)
 
-## License
+## 📄 License
 
 [MIT](LICENSE), copyright 2026 QZainSami. Dependencies retain their own licenses.
