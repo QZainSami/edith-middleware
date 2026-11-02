@@ -8,6 +8,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include <math.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -57,6 +58,14 @@ const char *moodNames[] = {
     "uwu"};
 
 Mood currentMood = NORMAL;
+bool dashboardMode = false;
+unsigned long speakingUntil = 0;
+void drawDashboard();
+void drawTimerScreen();
+bool hasTimerDisplay();
+void drawTimerBadge();
+void beginCompanion();
+void handleCompanion();
 
 // ==========================================
 // ANIMATION CONFIGURATION
@@ -182,8 +191,14 @@ void angryEyes()
 
 void sleepyEyes()
 {
-  curve(21, 30, 36, 40, 51, 30, 3);
-  curve(77, 30, 92, 40, 107, 30, 3);
+  oled.drawRBox(27, 43, 26, 8, 2);
+  oled.drawRBox(75, 43, 26, 8, 2);
+  oled.drawBox(30, 50, 20, 3);
+  oled.drawBox(78, 50, 20, 3);
+  oled.setFont(u8g2_font_5x7_tr);
+  oled.drawStr(104, 30, "z");
+  oled.drawStr(109, 23, "z");
+  oled.drawStr(114, 16, "Z");
 }
 
 void curiousEyes()
@@ -249,7 +264,7 @@ void angryMouth()
 
 void sleepyMouth()
 {
-  oled.drawCircle(64, 52, 3);
+  curve(56, 52, 64, 58, 72, 52, 2);
 }
 
 void curiousMouth()
@@ -326,6 +341,15 @@ void renderFace(Mood mood, bool blink = false)
     uwuEyes();
     uwuMouth();
     break;
+  }
+  if (speakingUntil != 0 && (long)(speakingUntil - millis()) <= 0) speakingUntil = 0;
+  if (speakingUntil != 0 && (long)(speakingUntil - millis()) > 0) {
+    oled.setDrawColor(0);
+    oled.drawBox(51, 46, 27, 18);
+    oled.setDrawColor(1);
+    const int openings[] = {2, 5, 3, 7, 2, 4, 6, 2};
+    int opening = openings[(millis() / 110) % 8];
+    oled.drawRFrame(56, 51 - opening / 2, 16, opening + 3, 2);
   }
 }
 
@@ -448,6 +472,18 @@ void updateAnimation()
 
   lastFrame = now;
 
+  if (hasTimerDisplay()) {
+    drawTimerScreen();
+    oled.sendBuffer();
+    return;
+  }
+
+  if (dashboardMode) {
+    drawDashboard();
+    oled.sendBuffer();
+    return;
+  }
+
   // Transitions always take priority
   if (transitioning)
   {
@@ -478,6 +514,7 @@ void updateAnimation()
   }
 
   renderFace(currentMood, blinking);
+  drawTimerBadge();
   oled.sendBuffer();
 }
 
@@ -749,6 +786,8 @@ void handleMood()
     return;
   }
 
+  dashboardMode = false;
+  speakingUntil = 0;
   beginTransition((Mood)selected);
 
   String json = "{\"success\":true,\"mood\":\"";
@@ -759,15 +798,180 @@ void handleMood()
 }
 
 
-// Background network worker only exchanges snapshots with the animation loop.
-// OLED/U8g2 functions always run in loop(), never on this worker.
+
+// Version 2 state snapshots. Network worker never touches the OLED.
 struct CloudSnapshot {
   char id[37];
   int mood;
+  bool dashboard;
+  char speechId[37];
+  uint32_t speechMs;
+  uint32_t epoch;
+  int utcOffset;
+  char city[17];
+  int weatherCode, temperature10, humidity, weatherAge;
+  char timerId[37];
+  int32_t timerMs;
 };
 QueueHandle_t cloudCommands = nullptr;
 QueueHandle_t cloudReports = nullptr;
 char appliedCloudId[37] = "";
+char activeSpeechId[37] = "";
+char activeTimerId[37] = "";
+CloudSnapshot displayState = {};
+uint32_t clockReceived = 0;
+uint32_t companionTimerDeadlineMs = 0;
+bool timerPresent = false;
+uint32_t timerDurationMs = 1;
+
+bool validId(const String &id) {
+  if (id == "-") return true;
+  if (id.length() != 36) return false;
+  for (size_t i = 0; i < id.length(); ++i)
+    if (!(isxdigit((unsigned char)id[i]) || id[i] == '-')) return false;
+  return true;
+}
+
+bool parseSnapshot(const String &body, CloudSnapshot &out) {
+  String fields[16];
+  int pos = 0;
+  for (int i = 0; i < 16; ++i) {
+    int end = body.indexOf('\n', pos);
+    if (end < 0) return false;
+    fields[i] = body.substring(pos, end);
+    pos = end + 1;
+  }
+  if (fields[0] != "EDITH2" || !validId(fields[1]) || !validId(fields[3]) ||
+      !validId(fields[5]) || !validId(fields[14]) ||
+      (fields[4] != "face" && fields[4] != "dashboard")) return false;
+  for (int i : {6, 7, 8, 10, 11, 12, 13, 15}) {
+    if (!fields[i].length()) return false;
+    for (size_t j = (fields[i][0] == '-' ? 1 : 0); j < fields[i].length(); ++j)
+      if (!isdigit((unsigned char)fields[i][j])) return false;
+    if (fields[i] == "-") return false;
+  }
+  int mood = -1;
+  for (int i = 0; i < 8; ++i) if (fields[2] == moodNames[i]) mood = i;
+  if (mood < 0) return false;
+  out = {};
+  fields[1].toCharArray(out.id, sizeof(out.id));
+  out.mood = mood;
+  out.dashboard = fields[4] == "dashboard";
+  fields[5].toCharArray(out.speechId, sizeof(out.speechId));
+  out.speechMs = fields[6].toInt();
+  out.epoch = strtoul(fields[7].c_str(), nullptr, 10);
+  out.utcOffset = fields[8].toInt();
+  fields[9].toCharArray(out.city, sizeof(out.city));
+  out.weatherCode = fields[10].toInt();
+  out.temperature10 = fields[11].toInt();
+  out.humidity = fields[12].toInt();
+  out.weatherAge = fields[13].toInt();
+  fields[14].toCharArray(out.timerId, sizeof(out.timerId));
+  out.timerMs = fields[15].toInt();
+  return out.speechMs <= 20000 && out.utcOffset >= -720 && out.utcOffset <= 840 &&
+         out.timerMs >= -1 && out.timerMs <= 86400000 && out.weatherCode >= -1 && out.weatherCode <= 99 &&
+         out.humidity >= -1 && out.humidity <= 100 && out.epoch > 1700000000;
+}
+
+int32_t remainingTimer() {
+  return timerPresent ? max((int32_t)0, (int32_t)(companionTimerDeadlineMs - millis())) : -1;
+}
+
+void formatTimer(char *buffer, size_t size) {
+  int32_t remaining = remainingTimer();
+  unsigned long seconds = (remaining + 999) / 1000;
+  if (seconds >= 3600)
+    snprintf(buffer, size, "%02lu:%02lu:%02lu", seconds/3600, (seconds/60)%60, seconds%60);
+  else snprintf(buffer, size, "%02lu:%02lu", seconds/60, seconds%60);
+}
+
+bool hasTimerDisplay() { return timerPresent; }
+
+void drawTimerScreen() {
+  oled.clearBuffer();
+  oled.setDrawColor(1);
+  int32_t remaining = remainingTimer();
+  oled.setFont(u8g2_font_5x7_tr);
+  const char *title = remaining == 0 ? "TIME UP" : "FOCUS TIMER";
+  oled.drawStr((128 - oled.getStrWidth(title))/2, 12, title);
+  char text[16]; formatTimer(text, sizeof(text));
+  oled.setFont(remaining >= 3600000 ? u8g2_font_logisoso16_tn : u8g2_font_logisoso24_tn);
+  oled.drawStr((128 - oled.getStrWidth(text))/2, 43, text);
+  oled.drawRFrame(14, 53, 100, 5, 2);
+  int fill = remaining == 0 ? 98 : constrain((int)(98.0 * remaining / timerDurationMs), 0, 98);
+  if (fill > 0) oled.drawBox(15, 54, fill, 3);
+  // A quiet orbiting dot; finished timers stay steady instead of flashing.
+  if (remaining > 0) {
+    float phase = (millis() % 6000) * 6.2831853f / 6000.0f;
+    oled.drawDisc(64 + (int)(53*cosf(phase)), 30 + (int)(18*sinf(phase)), 1);
+  }
+}
+
+void drawTimerBadge() {
+  if (!timerPresent) return;
+  oled.setFont(u8g2_font_4x6_tr);
+  if (remainingTimer() == 0) {
+    if ((millis()/500)%2) oled.drawStr(1, 7, "TIME UP!");
+  } else {
+    char timer[16]; formatTimer(timer, sizeof(timer));
+    oled.drawStr(1, 7, timer);
+  }
+}
+
+void drawDashboard() {
+  oled.clearBuffer(); oled.setDrawColor(1);
+  oled.drawFrame(0, 0, 128, 64);
+  oled.drawHLine(0, 12, 128);
+  oled.drawVLine(83, 13, 43);
+  oled.setFont(u8g2_font_5x7_tr);
+  if (displayState.epoch) {
+    time_t epoch = displayState.epoch + (millis()-clockReceived)/1000 + displayState.utcOffset*60;
+    struct tm current; gmtime_r(&epoch, &current);
+    char date[24], clock[8];
+    strftime(date, sizeof(date), "%a %d %b", &current);
+    strftime(clock, sizeof(clock), "%H:%M", &current);
+    oled.drawStr(4, 9, date);
+    oled.setFont(u8g2_font_logisoso24_tn);
+    oled.drawStr(3, 43, clock);
+  } else {
+    oled.drawStr(4, 9, "EDITH DASHBOARD");
+    oled.drawStr(6, 35, "Sync clock...");
+  }
+  if (WiFi.status() == WL_CONNECTED) oled.drawDisc(121, 6, 2);
+  else oled.drawCircle(121, 6, 2);
+  oled.setFont(u8g2_font_5x7_tr);
+  if (displayState.weatherAge >= 0 && displayState.weatherCode >= 0) {
+    bool clear = displayState.weatherCode <= 1;
+    if (clear) {
+      oled.drawCircle(105, 22, 5);
+      oled.drawLine(105,14,105,16); oled.drawLine(105,28,105,30);
+      oled.drawLine(97,22,99,22); oled.drawLine(111,22,113,22);
+    } else {
+      oled.drawCircle(102,23,4); oled.drawCircle(108,21,5); oled.drawHLine(98,27,16);
+      if (displayState.weatherCode >= 51) {
+        oled.drawLine(101,29,100,32); oled.drawLine(109,29,108,32);
+      }
+    }
+    char temperature[12], humidity[12];
+    snprintf(temperature, sizeof(temperature), "%.1fC", displayState.temperature10/10.0);
+    snprintf(humidity, sizeof(humidity), "RH %d%%", displayState.humidity);
+    oled.drawStr(87, 42, temperature); oled.drawStr(87, 52, humidity);
+    if (displayState.weatherAge + (int)((millis()-clockReceived)/1000) > 1800)
+      oled.drawStr(119, 21, "*");
+  } else {
+    oled.drawStr(88, 28, "WEATHER"); oled.drawStr(88, 41, "--");
+  }
+  oled.setFont(u8g2_font_4x6_tr);
+  oled.drawStr(4, 53, displayState.city[0] ? displayState.city : "Set city in UI");
+  oled.drawHLine(1, 56, 126);
+  oled.setFont(u8g2_font_5x7_tr);
+  if (timerPresent) {
+    char timer[16]; formatTimer(timer, sizeof(timer));
+    oled.drawStr(4, 63, remainingTimer() == 0 ? "TIME UP!" : "TIMER");
+    if (remainingTimer() > 0) oled.drawStr(58, 63, timer);
+    else if ((millis()/500)%2) oled.drawFrame(0,0,128,64);
+  } else oled.drawStr(4, 63, "RESTING  z z z");
+}
 
 void cloudWorker(void *) {
   String origin = EDITH_SERVER_URL;
@@ -775,12 +979,10 @@ void cloudWorker(void *) {
   bool tls = origin.startsWith("https://");
   if ((!tls && !(EDITH_ALLOW_HTTP_TEST && origin.startsWith("http://"))) ||
       strlen(EDITH_DEVICE_TOKEN) < 32 || (tls && strlen(EDITH_ROOT_CA) < 100)) {
-    Serial.println("Cloud configuration incomplete; local animation remains active.");
-    vTaskDelete(nullptr);
-    return;
+    Serial.println("Cloud configuration incomplete; animation remains active.");
+    vTaskDelete(nullptr); return;
   }
   unsigned long waitMs = 1500;
-  char offered[37] = "";
   for (;;) {
     bool success = false;
     if (WiFi.status() == WL_CONNECTED && (!tls || time(nullptr) > 1700000000)) {
@@ -790,75 +992,81 @@ void cloudWorker(void *) {
       WiFiClientSecure secure;
       if (tls) secure.setCACert(EDITH_ROOT_CA);
       HTTPClient http;
-      http.setConnectTimeout(3000);
-      http.setTimeout(5000);
-      http.setReuse(false);
-      bool started = tls ? http.begin(secure, origin + "/api/device/poll")
-                         : http.begin(plain, origin + "/api/device/poll");
+      http.setConnectTimeout(3000); http.setTimeout(5000); http.setReuse(false);
+      bool started = tls ? http.begin(secure, origin + "/api/device/poll-v2")
+                         : http.begin(plain, origin + "/api/device/poll-v2");
       if (started) {
         http.addHeader("Authorization", String("Bearer ") + EDITH_DEVICE_TOKEN);
         http.addHeader("X-Edith-Ack", report.id);
         http.addHeader("X-Edith-Mood", moodNames[report.mood]);
+        http.addHeader("X-Edith-Mode", report.dashboard ? "dashboard" : "face");
         int code = http.POST("");
-        if (code == 204) success = true;
-        if (code == 200 && http.getSize() > 0 && http.getSize() <= 64) {
-          String body = http.getString();
-          int split = body.indexOf('\n');
-          String id = body.substring(0, split);
-          String mood = body.substring(split + 1);
-          mood.trim();
-          bool validId = split == 36;
-          for (size_t i = 0; i < id.length() && validId; ++i)
-            validId = isxdigit((unsigned char)id[i]) || id[i] == '-';
-          int selected = -1;
-          for (int i = 0; i < 8; ++i) if (mood == moodNames[i]) selected = i;
-          if (validId && selected >= 0) {
-            success = true;
-            if (id != offered) {
-              CloudSnapshot command = {};
-              id.toCharArray(command.id, sizeof(command.id));
-              command.mood = selected;
-              xQueueOverwrite(cloudCommands, &command);
-              strlcpy(offered, command.id, sizeof(offered));
-            }
+        if (code == 200 && http.getSize() > 0 && http.getSize() <= 512) {
+          CloudSnapshot command;
+          if (parseSnapshot(http.getString(), command)) {
+            xQueueOverwrite(cloudCommands, &command); success = true;
           }
         }
       }
       http.end();
     }
-    waitMs = success ? 1500 : min(waitMs * 2, 30000UL);
+    waitMs = success ? 1500 : min(waitMs*2, 30000UL);
     vTaskDelay(pdMS_TO_TICKS(waitMs));
   }
 }
 
-void beginCloud() {
-  if (!EDITH_CLOUD_ENABLED) return;
+void beginCompanion() {
   cloudCommands = xQueueCreate(1, sizeof(CloudSnapshot));
   cloudReports = xQueueCreate(1, sizeof(CloudSnapshot));
   if (!cloudCommands || !cloudReports) {
-    Serial.println("Cloud queues could not be allocated.");
-    return;
+    Serial.println("Companion queues could not be allocated."); return;
   }
-  CloudSnapshot initial = {};
-  initial.mood = (int)currentMood;
+  CloudSnapshot initial = {}; initial.mood = (int)currentMood;
   xQueueOverwrite(cloudReports, &initial);
   configTime(0, 0, "pool.ntp.org", "time.google.com");
-  if (xTaskCreate(cloudWorker, "edith-cloud", 12288, nullptr, 1, nullptr) != pdPASS)
+  if (EDITH_CLOUD_ENABLED && xTaskCreate(cloudWorker, "edith-cloud", 12288, nullptr, 1, nullptr) != pdPASS)
     Serial.println("Cloud task could not start.");
 }
 
+void handleCompanion() {
+  CloudSnapshot command;
+  if (!cloudCommands || server.arg("plain").length() > 512 || !parseSnapshot(server.arg("plain"), command)) {
+    server.send(400, "application/json", "{\"error\":\"Invalid companion snapshot\"}"); return;
+  }
+  xQueueOverwrite(cloudCommands, &command);
+  server.send(200, "application/json", "{\"queued\":true}");
+}
+
 void updateCloud() {
-  if (!EDITH_CLOUD_ENABLED || !cloudCommands || !cloudReports) return;
+  if (!cloudCommands || !cloudReports) return;
   CloudSnapshot command;
   if (xQueueReceive(cloudCommands, &command, 0) == pdTRUE) {
-    beginTransition((Mood)command.mood);
-    strlcpy(appliedCloudId, command.id, sizeof(appliedCloudId));
+    bool wake = dashboardMode && !command.dashboard;
+    dashboardMode = command.dashboard;
+    displayState = command; clockReceived = millis();
+    if (command.id[0] != '-' && (strcmp(appliedCloudId, command.id) || wake)) {
+      beginTransition((Mood)command.mood);
+      strlcpy(appliedCloudId, command.id, sizeof(appliedCloudId));
+    }
+    if (dashboardMode) { transitioning = false; blinking = false; speakingUntil = 0; }
+    if (strcmp(activeSpeechId, command.speechId)) {
+      strlcpy(activeSpeechId, command.speechId, sizeof(activeSpeechId));
+      if (!dashboardMode) speakingUntil = millis() + command.speechMs;
+    }
+    if (command.timerMs < 0) { timerPresent = false; activeTimerId[0] = 0; }
+    else {
+      if (strcmp(activeTimerId, command.timerId) || abs(remainingTimer()-command.timerMs) > 3000) {
+        if (strcmp(activeTimerId, command.timerId) != 0) timerDurationMs = max((uint32_t)1, (uint32_t)command.timerMs);
+        companionTimerDeadlineMs = millis() + command.timerMs;
+      }
+      timerPresent = true;
+      strlcpy(activeTimerId, command.timerId, sizeof(activeTimerId));
+    }
   }
-  // Acknowledge after the transition has completed, not merely on receipt.
   if (!transitioning) {
     CloudSnapshot report = {};
     strlcpy(report.id, appliedCloudId, sizeof(report.id));
-    report.mood = (int)currentMood;
+    report.mood = (int)currentMood; report.dashboard = dashboardMode;
     xQueueOverwrite(cloudReports, &report);
   }
 }
@@ -912,6 +1120,7 @@ void setup()
   server.on("/", HTTP_GET, handleHome);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/mood", HTTP_GET, handleMood);
+  server.on("/companion", HTTP_POST, handleCompanion);
 
   server.onNotFound([]()
                     { server.send(
@@ -923,7 +1132,7 @@ void setup()
 
   connectWiFi();
   if (EDITH_LOCAL_HTTP_ENABLED) server.begin();
-  beginCloud();
+  beginCompanion();
 
   lastBlink = millis();
 

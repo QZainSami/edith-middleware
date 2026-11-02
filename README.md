@@ -218,3 +218,15 @@ Touch reactions, sound cues, wake word "EDITH", speech input/output, a companion
 ## 📄 License
 
 [MIT](LICENSE), copyright 2026 QZainSami. Dependencies retain their own licenses.
+
+## 💤 Clock dashboard, timer and mouth animation
+
+Upload this firmware together with the updated backend. Existing Wi-Fi, device token and server URL settings stay the same. Polling uses `/api/device/poll-v2`; local mode adds `POST /companion`. Older backend versions do not provide these features.
+
+Use the backend Control Center to switch between **Sleep / dashboard** and **Wake / face**, save a city/time zone, and start or dismiss a timer. Sleep is a connected dashboard, not power-saving deep sleep. The display shows date/time, weather icon, temperature, humidity and city; stale weather has an asterisk. Missing weather uses placeholders. Time advances locally from the latest backend synchronization.
+
+Timers take over the OLED with large countdown digits, a slim progress bar and a slow orbiting dot, without clock/weather panels. They run locally through temporary network loss and show **TIME UP** until dismissed. After a power cycle, reconnect to recover the backend's saved timer. There is no buzzer or speaker alarm yet. Chat replies animate the mouth for an estimated duration; this is a visual speaking effect, with real audio synchronization planned later. Face transitions and blinking are preserved.
+
+Typed backend commands include `EDITH sleep`, `EDITH wake up`, `set a timer for 5 minutes` and `cancel timer`. Weather location and clock offset are configured in the browser, not in firmware. Pakistan uses an offset of 300 minutes. No new hardware is required for these display features.
+
+The dashboard and animation changes still require a successful local build/upload and physical OLED verification. The development environment's installed compiler failed to launch before C++ compilation.
