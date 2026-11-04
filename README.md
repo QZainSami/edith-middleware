@@ -230,3 +230,14 @@ Timers take over the OLED with large countdown digits, a slim progress bar and a
 Typed backend commands include `EDITH sleep`, `EDITH wake up`, `set a timer for 5 minutes` and `cancel timer`. Weather location and clock offset are configured in the browser, not in firmware. Pakistan uses an offset of 300 minutes. No new hardware is required for these display features.
 
 The dashboard and animation changes still require a successful local build/upload and physical OLED verification. The development environment's installed compiler failed to launch before C++ compilation.
+
+## ⚡ Glitch boot and time tools
+
+The OLED now has a short (about 1.4 second) robotic scan-line boot animation. New stopwatch and alarm displays use the existing network link; no new libraries or wiring are needed. Upload this firmware and restart the matching updated backend before using them.
+
+Start/resume, pause/reset a stopwatch, or set/dismiss a one-time alarm from Android or the backend Control Center. Stopwatch elapsed time and alarm deadlines are restored from the backend after reconnecting. Both advance locally during a temporary network outage while the ESP32 stays powered. Stopwatch limit is 99:59:59.99. A due alarm overrides the other displays until dismissed; a timer overrides the selected stopwatch, and the stopwatch can keep running in the background when another screen is selected.
+
+Alarms are visual only; speaker output is not implemented. Power loss needs a backend reconnection to restore state. Due alarms stay visible until dismissed in the app/web controls. The optional TOOLS1 extension adds six fields to the original v2 snapshot, while this firmware also accepts old 16-field snapshots.
+
+## 📺 Ambient OLED glitches
+During normal operation, a brief cosmetic glitch occurs every 25–70 seconds (150–270 ms). Shifted scan bands and a few noise pixels affect only the transmitted frame; the clean buffer is restored immediately. It adds no delays and leaves face/timer state intact. Due alarms and finished timer alerts suppress the effect. Adjust GLITCH_MIN_INTERVAL_MS and GLITCH_MAX_INTERVAL_MS in src/main.cpp to change the frequency.

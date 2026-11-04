@@ -1,5 +1,6 @@
 
 #include <Arduino.h>
+#include <esp_random.h>
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -59,6 +60,8 @@ const char *moodNames[] = {
 
 Mood currentMood = NORMAL;
 bool dashboardMode = false;
+bool stopwatchMode = false;
+bool drawExtraTimeScreen();
 unsigned long speakingUntil = 0;
 void drawDashboard();
 void drawTimerScreen();
@@ -92,6 +95,51 @@ const int BUFFER_SIZE = 1024;
 
 uint8_t fromFrame[BUFFER_SIZE];
 uint8_t toFrame[BUFFER_SIZE];
+
+// Cosmetic only: the clean framebuffer is restored immediately after transmission.
+const uint32_t GLITCH_MIN_INTERVAL_MS = 25000;
+const uint32_t GLITCH_MAX_INTERVAL_MS = 70000;
+bool timeAlertVisible();
+void presentDisplay() {
+  static uint8_t cleanFrame[BUFFER_SIZE];
+  static bool scheduled = false, active = false;
+  static uint32_t nextAt = 0, began = 0, duration = 0;
+  uint32_t now = millis();
+  auto schedule = [&]() {
+    nextAt = now + GLITCH_MIN_INTERVAL_MS +
+      esp_random() % (GLITCH_MAX_INTERVAL_MS - GLITCH_MIN_INTERVAL_MS + 1);
+    scheduled = true;
+  };
+  // Keep due alarms and completed timers clearly readable.
+  if (timeAlertVisible()) {
+    active = false; schedule(); oled.sendBuffer(); return;
+  }
+  if (!scheduled) schedule();
+  if (!active && (int32_t)(now-nextAt) >= 0) {
+    active = true; began = now; duration = 150 + esp_random()%121;
+  }
+  if (active && (uint32_t)(now-began) >= duration) {
+    active = false; schedule();
+  }
+  if (!active) { oled.sendBuffer(); return; }
+
+  uint8_t *pixels = oled.getBufferPtr();
+  memcpy(cleanFrame, pixels, BUFFER_SIZE);
+  int band = 1 + esp_random()%6;
+  int shift = (int)(esp_random()%11)-5;
+  if (shift == 0) shift = 3;
+  for (int x=0; x<128; ++x) {
+    pixels[band*128+x] = cleanFrame[band*128+(x-shift+128)%128];
+    int other = (band+3)%8;
+    pixels[other*128+x] = cleanFrame[other*128+(x+shift+128)%128];
+  }
+  int y = 8 + esp_random()%48;
+  int start = 8 + esp_random()%48;
+  for(int x=start; x<start+32; ++x) pixels[(y/8)*128+x] ^= (uint8_t)(1U<<(y%8));
+  for(int i=0; i<9; ++i) pixels[esp_random()%BUFFER_SIZE] ^= (uint8_t)(1U<<(esp_random()%8));
+  oled.sendBuffer();
+  memcpy(pixels, cleanFrame, BUFFER_SIZE);
+}
 
 // 8x8 ordered dither matrix for smooth dissolve
 const uint8_t bayer[8][8] = {
@@ -416,7 +464,7 @@ void updateTransition(unsigned long now)
   {
     transitioning = false;
     renderFace(currentMood);
-    oled.sendBuffer();
+    presentDisplay();
     return;
   }
 
@@ -454,7 +502,7 @@ void updateTransition(unsigned long now)
     }
   }
 
-  oled.sendBuffer();
+  presentDisplay();
 }
 
 // ==========================================
@@ -472,15 +520,17 @@ void updateAnimation()
 
   lastFrame = now;
 
+  if (drawExtraTimeScreen()) { presentDisplay(); return; }
+
   if (hasTimerDisplay()) {
     drawTimerScreen();
-    oled.sendBuffer();
+    presentDisplay();
     return;
   }
 
   if (dashboardMode) {
     drawDashboard();
-    oled.sendBuffer();
+    presentDisplay();
     return;
   }
 
@@ -515,7 +565,7 @@ void updateAnimation()
 
   renderFace(currentMood, blinking);
   drawTimerBadge();
-  oled.sendBuffer();
+  presentDisplay();
 }
 
 // ==========================================
@@ -524,19 +574,23 @@ void updateAnimation()
 
 void showStartup()
 {
-  oled.clearBuffer();
-
-  oled.setFont(u8g2_font_ncenB14_tr);
-  oled.drawStr(32, 28, "EDITH");
-
-  oled.setFont(u8g2_font_5x7_tr);
-  oled.drawStr(27, 46, "INITIALIZING");
-
-  oled.sendBuffer();
-
-  delay(1000);
+  for(int frame=0;frame<40;++frame) {
+    oled.clearBuffer(); oled.setDrawColor(1);
+    oled.drawFrame(3,3,122,58);
+    oled.setFont(u8g2_font_5x7_tr); oled.drawStr(10,13,"EDITH // CORE BOOT");
+    oled.setFont(u8g2_font_ncenB14_tr);
+    int shift=(frame%11==0 && frame<27)?2:0;
+    oled.drawStr(32+shift,36,"EDITH");
+    if(frame<26) {
+      oled.setDrawColor(0); oled.drawBox(12,(frame*7)%38+15,102,2); oled.setDrawColor(1);
+      for(int n=0;n<5;++n) oled.drawHLine(9+(frame*17+n*23)%100,17+(frame*3+n*9)%25,3+(n*5)%13);
+    }
+    oled.setFont(u8g2_font_4x6_tr);
+    oled.drawStr(12,46,frame<14?"SIGNAL ACQUIRED":frame<28?"SYNCING NEURAL CORE":"SYSTEM READY");
+    oled.drawFrame(11,51,106,4); oled.drawBox(12,52,(frame+1)*104/40,2);
+    oled.sendBuffer(); delay(35);
+  }
 }
-
 // ==========================================
 // WEB CONTROL CENTER
 // ==========================================
@@ -787,6 +841,7 @@ void handleMood()
   }
 
   dashboardMode = false;
+  stopwatchMode = false;
   speakingUntil = 0;
   beginTransition((Mood)selected);
 
@@ -804,6 +859,10 @@ struct CloudSnapshot {
   char id[37];
   int mood;
   bool dashboard;
+  bool stopwatch, stopwatchRunning;
+  char stopwatchId[37], alarmId[37];
+  uint32_t stopwatchMs;
+  int32_t alarmMs;
   char speechId[37];
   uint32_t speechMs;
   uint32_t epoch;
@@ -823,6 +882,13 @@ uint32_t clockReceived = 0;
 uint32_t companionTimerDeadlineMs = 0;
 bool timerPresent = false;
 uint32_t timerDurationMs = 1;
+char activeStopwatchId[37] = "", activeAlarmId[37] = "";
+uint32_t stopwatchBase = 0, stopwatchReceived = 0, alarmEnd = 0;
+bool stopwatchRunning = false, alarmPresent = false;
+uint32_t stopwatchElapsed() {
+  uint32_t elapsed=stopwatchBase+(stopwatchRunning?(uint32_t)(millis()-stopwatchReceived):0U);
+  return elapsed>359999990U?359999990U:elapsed;
+}
 
 bool validId(const String &id) {
   if (id == "-") return true;
@@ -843,7 +909,7 @@ bool parseSnapshot(const String &body, CloudSnapshot &out) {
   }
   if (fields[0] != "EDITH2" || !validId(fields[1]) || !validId(fields[3]) ||
       !validId(fields[5]) || !validId(fields[14]) ||
-      (fields[4] != "face" && fields[4] != "dashboard")) return false;
+      (fields[4] != "face" && fields[4] != "dashboard" && fields[4] != "stopwatch")) return false;
   for (int i : {6, 7, 8, 10, 11, 12, 13, 15}) {
     if (!fields[i].length()) return false;
     for (size_t j = (fields[i][0] == '-' ? 1 : 0); j < fields[i].length(); ++j)
@@ -857,6 +923,9 @@ bool parseSnapshot(const String &body, CloudSnapshot &out) {
   fields[1].toCharArray(out.id, sizeof(out.id));
   out.mood = mood;
   out.dashboard = fields[4] == "dashboard";
+  out.stopwatch = fields[4] == "stopwatch";
+  out.alarmMs = -1;
+  strcpy(out.stopwatchId, "-"); strcpy(out.alarmId, "-");
   fields[5].toCharArray(out.speechId, sizeof(out.speechId));
   out.speechMs = fields[6].toInt();
   out.epoch = strtoul(fields[7].c_str(), nullptr, 10);
@@ -868,6 +937,25 @@ bool parseSnapshot(const String &body, CloudSnapshot &out) {
   out.weatherAge = fields[13].toInt();
   fields[14].toCharArray(out.timerId, sizeof(out.timerId));
   out.timerMs = fields[15].toInt();
+  if (pos < (int)body.length()) {
+    String extra[6];
+    for (int i=0; i<6; ++i) {
+      int end=body.indexOf('\n',pos); if(end<0) return false;
+      extra[i]=body.substring(pos,end); pos=end+1;
+    }
+    if(extra[0]!="TOOLS1" || !validId(extra[1]) || !validId(extra[4]) ||
+       (extra[3]!="0" && extra[3]!="1")) return false;
+    for(int i : {2,5}) {
+      if(!extra[i].length() || extra[i]=="-") return false;
+      for(size_t j=(extra[i][0]=='-'?1:0);j<extra[i].length();++j)
+        if(!isdigit((unsigned char)extra[i][j])) return false;
+    }
+    long long sw=strtoll(extra[2].c_str(),nullptr,10), alarm=strtoll(extra[5].c_str(),nullptr,10);
+    if(sw<0 || sw>359999990 || alarm < -1 || alarm>604800000) return false;
+    extra[1].toCharArray(out.stopwatchId,sizeof(out.stopwatchId));
+    extra[4].toCharArray(out.alarmId,sizeof(out.alarmId));
+    out.stopwatchMs=sw; out.stopwatchRunning=extra[3]=="1"; out.alarmMs=alarm;
+  }
   return out.speechMs <= 20000 && out.utcOffset >= -720 && out.utcOffset <= 840 &&
          out.timerMs >= -1 && out.timerMs <= 86400000 && out.weatherCode >= -1 && out.weatherCode <= 99 &&
          out.humidity >= -1 && out.humidity <= 100 && out.epoch > 1700000000;
@@ -877,12 +965,44 @@ int32_t remainingTimer() {
   return timerPresent ? max((int32_t)0, (int32_t)(companionTimerDeadlineMs - millis())) : -1;
 }
 
+bool timeAlertVisible() {
+  return (alarmPresent && (int32_t)(alarmEnd-millis()) <= 0) ||
+         (timerPresent && remainingTimer() == 0);
+}
+
 void formatTimer(char *buffer, size_t size) {
   int32_t remaining = remainingTimer();
   unsigned long seconds = (remaining + 999) / 1000;
   if (seconds >= 3600)
     snprintf(buffer, size, "%02lu:%02lu:%02lu", seconds/3600, (seconds/60)%60, seconds%60);
   else snprintf(buffer, size, "%02lu:%02lu", seconds/60, seconds%60);
+}
+
+bool drawExtraTimeScreen() {
+  bool due=alarmPresent && (int32_t)(alarmEnd-millis())<=0;
+  if(!due && (!stopwatchMode || timerPresent)) return false;
+  oled.clearBuffer(); oled.setDrawColor(1);
+  oled.setFont(u8g2_font_5x7_tr);
+  if(due) {
+    oled.drawRFrame(3,3,122,58,7);
+    oled.drawStr(45,16,"ALARM");
+    oled.drawCircle(64,31,9); oled.drawLine(64,25,64,32); oled.drawLine(64,32,70,35);
+    oled.drawDisc(64,45,1);
+    oled.drawStr(14,57,"DISMISS IN THE APP");
+  } else {
+    uint32_t elapsed=stopwatchElapsed();
+    char value[16]; uint32_t seconds=elapsed/1000;
+    oled.drawStr(38,10,"STOPWATCH");
+    oled.setFont(seconds>=3600?u8g2_font_logisoso16_tn:u8g2_font_logisoso24_tn);
+    if(seconds>=3600) snprintf(value,sizeof(value),"%02lu:%02lu:%02lu",seconds/3600,(seconds/60)%60,seconds%60);
+    else snprintf(value,sizeof(value),"%02lu:%02lu",seconds/60,seconds%60);
+    oled.drawStr((128-oled.getStrWidth(value))/2,39,value);
+    oled.setFont(u8g2_font_5x7_tr); snprintf(value,sizeof(value),".%02lu",(elapsed/10)%100);
+    oled.drawStr(56,49,value);
+    oled.drawHLine(15,54,98); oled.drawStr(44,63,stopwatchRunning && elapsed<359999990UL?"RUNNING":"PAUSED");
+    if(stopwatchRunning) oled.drawDisc(16+(millis()/60)%96,54,1);
+  }
+  return true;
 }
 
 bool hasTimerDisplay() { return timerPresent; }
@@ -970,6 +1090,10 @@ void drawDashboard() {
     oled.drawStr(4, 63, remainingTimer() == 0 ? "TIME UP!" : "TIMER");
     if (remainingTimer() > 0) oled.drawStr(58, 63, timer);
     else if ((millis()/500)%2) oled.drawFrame(0,0,128,64);
+  } else if(alarmPresent) {
+    int32_t seconds=max((int32_t)0,(int32_t)(alarmEnd-millis()))/1000;
+    char alarm[24]; snprintf(alarm,sizeof(alarm),"ALARM IN %02ld:%02ld",(long)seconds/3600,(long)(seconds/60)%60);
+    oled.drawStr(4,63,alarm);
   } else oled.drawStr(4, 63, "RESTING  z z z");
 }
 
@@ -999,7 +1123,7 @@ void cloudWorker(void *) {
         http.addHeader("Authorization", String("Bearer ") + EDITH_DEVICE_TOKEN);
         http.addHeader("X-Edith-Ack", report.id);
         http.addHeader("X-Edith-Mood", moodNames[report.mood]);
-        http.addHeader("X-Edith-Mode", report.dashboard ? "dashboard" : "face");
+        http.addHeader("X-Edith-Mode", report.stopwatch ? "stopwatch" : (report.dashboard ? "dashboard" : "face"));
         int code = http.POST("");
         if (code == 200 && http.getSize() > 0 && http.getSize() <= 512) {
           CloudSnapshot command;
@@ -1041,17 +1165,32 @@ void updateCloud() {
   if (!cloudCommands || !cloudReports) return;
   CloudSnapshot command;
   if (xQueueReceive(cloudCommands, &command, 0) == pdTRUE) {
-    bool wake = dashboardMode && !command.dashboard;
+    bool wake = (dashboardMode || stopwatchMode) && !command.dashboard && !command.stopwatch;
     dashboardMode = command.dashboard;
+    stopwatchMode = command.stopwatch;
+    uint32_t currentSw = stopwatchElapsed();
+    if(strcmp(activeStopwatchId,command.stopwatchId) || abs((int32_t)currentSw-(int32_t)command.stopwatchMs)>1000) {
+      stopwatchBase=command.stopwatchMs; stopwatchReceived=millis();
+    }
+    stopwatchRunning=command.stopwatchRunning;
+    strlcpy(activeStopwatchId,command.stopwatchId,sizeof(activeStopwatchId));
+    if(command.alarmMs<0) alarmPresent=false;
+    else {
+      int32_t remaining=alarmPresent ? max((int32_t)0,(int32_t)(alarmEnd-millis())) : -1;
+      if(!alarmPresent || strcmp(activeAlarmId,command.alarmId) || abs(remaining-command.alarmMs)>3000)
+        alarmEnd=millis()+command.alarmMs;
+      alarmPresent=true;
+    }
+    strlcpy(activeAlarmId,command.alarmId,sizeof(activeAlarmId));
     displayState = command; clockReceived = millis();
     if (command.id[0] != '-' && (strcmp(appliedCloudId, command.id) || wake)) {
       beginTransition((Mood)command.mood);
       strlcpy(appliedCloudId, command.id, sizeof(appliedCloudId));
     }
-    if (dashboardMode) { transitioning = false; blinking = false; speakingUntil = 0; }
+    if (dashboardMode || stopwatchMode || command.alarmMs == 0) { transitioning = false; blinking = false; speakingUntil = 0; }
     if (strcmp(activeSpeechId, command.speechId)) {
       strlcpy(activeSpeechId, command.speechId, sizeof(activeSpeechId));
-      if (!dashboardMode) speakingUntil = millis() + command.speechMs;
+      if (!dashboardMode && !stopwatchMode) speakingUntil = millis() + command.speechMs;
     }
     if (command.timerMs < 0) { timerPresent = false; activeTimerId[0] = 0; }
     else {
@@ -1066,7 +1205,7 @@ void updateCloud() {
   if (!transitioning) {
     CloudSnapshot report = {};
     strlcpy(report.id, appliedCloudId, sizeof(report.id));
-    report.mood = (int)currentMood; report.dashboard = dashboardMode;
+    report.mood = (int)currentMood; report.dashboard = dashboardMode; report.stopwatch = stopwatchMode;
     xQueueOverwrite(cloudReports, &report);
   }
 }
