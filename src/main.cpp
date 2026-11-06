@@ -45,7 +45,10 @@ enum Mood
   SLEEPY,
   CURIOUS,
   THINKING,
-  UWU
+  UWU,
+  SHY,
+  BLUSH,
+  UNKNOWN
 };
 
 const char *moodNames[] = {
@@ -56,7 +59,8 @@ const char *moodNames[] = {
     "sleepy",
     "curious",
     "thinking",
-    "uwu"};
+    "uwu", "shy", "blush", "unknown"};
+const int MOOD_COUNT = sizeof(moodNames) / sizeof(moodNames[0]);
 
 Mood currentMood = NORMAL;
 bool dashboardMode = false;
@@ -385,6 +389,22 @@ void renderFace(Mood mood, bool blink = false)
     thinkingMouth();
     break;
 
+  case SHY:
+  case BLUSH:
+    curve(25, 27, 36, 43, 47, 27, 3);
+    curve(81, 27, 92, 43, 103, 27, 3);
+    if (mood == SHY) oled.drawDisc(64, 53, 2);
+    else uwuMouth();
+    for (int x = 19; x <= 91; x += 72) for (int i = 0; i < 3; ++i)
+      oled.drawLine(x + i*5, 44, x + i*5 - 2, 49);
+    break;
+  case UNKNOWN:
+    oled.drawRBox(23, 26, 27, 11, 3);
+    oled.drawRBox(78, 26, 27, 11, 3);
+    curve(57, 52, 65, 59, 73, 49, 2);
+    for (int x = 19; x <= 91; x += 72) for (int i = 0; i < 3; ++i)
+      oled.drawLine(x + i*5, 44, x + i*5 - 2, 49);
+    break;
   case UWU:
     uwuEyes();
     uwuMouth();
@@ -712,6 +732,7 @@ button.active{
 <button data-mood="sleepy" onclick="setMood('sleepy')">Sleepy</button>
 <button data-mood="curious" onclick="setMood('curious')">Curious</button>
 <button data-mood="thinking" onclick="setMood('thinking')">Thinking</button>
+<button onclick="setMood('shy')">Shy</button><button onclick="setMood('blush')">Blush</button><button onclick="setMood('unknown')">Unknown</button>
 <button data-mood="uwu" onclick="setMood('uwu')">UwU</button>
 </div>
 
@@ -822,7 +843,7 @@ void handleMood()
 
   int selected = -1;
 
-  for (int i = 0; i < 8; i++)
+  for (int i = 0; i < MOOD_COUNT; i++)
   {
     if (requested == moodNames[i])
     {
@@ -917,7 +938,7 @@ bool parseSnapshot(const String &body, CloudSnapshot &out) {
     if (fields[i] == "-") return false;
   }
   int mood = -1;
-  for (int i = 0; i < 8; ++i) if (fields[2] == moodNames[i]) mood = i;
+  for (int i = 0; i < MOOD_COUNT; ++i) if (fields[2] == moodNames[i]) mood = i;
   if (mood < 0) return false;
   out = {};
   fields[1].toCharArray(out.id, sizeof(out.id));

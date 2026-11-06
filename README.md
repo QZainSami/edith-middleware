@@ -1,6 +1,6 @@
 # 🤖 EDITH Middleware
 
-Cross-platform PlatformIO project for the ESP32-S3 firmware of EDITH. Drives a 128x64 SH1106 OLED with eight expressions, blinking and smooth dissolve transitions. Supports local HTTP control and outward authenticated polling of the companion backend.
+Cross-platform PlatformIO project for the ESP32-S3 firmware of EDITH. Drives a 128x64 SH1106 OLED with eleven expressions, blinking and smooth dissolve transitions. Supports local HTTP control and outward authenticated polling of the companion backend.
 
 Build and upload from Windows 11 or Linux, including CachyOS/KDE. PlatformIO downloads the compiler for the host operating system; the firmware still runs on the same ESP32. No Windows drive letters or COM ports are hardcoded in the project.
 
@@ -99,7 +99,7 @@ The serial monitor reports the device's IP. Open that IP in your browser:
 - `GET /status`: current mood and animation status.
 - `GET /mood?name=happy`: start a face transition.
 
-Supported moods: `normal`, `happy`, `sad`, `angry`, `sleepy`, `curious`, `thinking`, `uwu`.
+Supported moods: `normal`, `happy`, `sad`, `angry`, `sleepy`, `curious`, `thinking`, `uwu`, `shy`, `blush`, `unknown`.
 
 Local HTTP controls have no authentication and are for trusted LAN use only. Never expose the ESP32's local web server directly to the internet.
 
