@@ -31,6 +31,10 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(
     U8X8_PIN_NONE);
 
 WebServer server(80);
+#ifndef EDITH_SECOND_BACKEND_ENABLED
+#define EDITH_SECOND_BACKEND_ENABLED 0
+#endif
+#include "setup_portal.h"
 
 // ==========================================
 // EXPRESSIONS
@@ -67,6 +71,10 @@ bool dashboardMode = false;
 bool stopwatchMode = false;
 bool drawExtraTimeScreen();
 unsigned long speakingUntil = 0;
+uint32_t lastUserActivity = 0;
+uint32_t lastDemoFace = 0;
+bool userHasControlledFace = false;
+void noteUserActivity() { lastUserActivity = millis(); userHasControlledFace = true; }
 void drawDashboard();
 void drawTimerScreen();
 bool hasTimerDisplay();
@@ -104,45 +112,64 @@ uint8_t toFrame[BUFFER_SIZE];
 const uint32_t GLITCH_MIN_INTERVAL_MS = 25000;
 const uint32_t GLITCH_MAX_INTERVAL_MS = 70000;
 bool timeAlertVisible();
+
+// Render-only guest appearance: never changes mood, command acknowledgements,
+// clock state, speech timing or timer deadlines.
+void drawEvilGlitchFace(uint32_t age) {
+  oled.clearBuffer(); oled.setDrawColor(1);
+  int lean = (int)(2*sinf(age*.012f));
+  oled.drawTriangle(19,20+lean, 53,32, 24,40);
+  oled.drawTriangle(109,20-lean, 75,32, 104,40);
+  oled.drawLine(18,13+lean,53,25); oled.drawLine(75,25,110,13-lean);
+  oled.drawLine(18,14+lean,53,26); oled.drawLine(75,26,110,14-lean);
+  // Wide segmented grin with black tooth separators.
+  oled.drawRBox(40,43,48,14,6);
+  oled.setDrawColor(0);
+  oled.drawTriangle(40,43,88,43,64,49);
+  for (int x=46; x<87; x+=7) oled.drawVLine(x,46,11);
+  oled.setDrawColor(1);
+  oled.drawPixel(14,25); oled.drawPixel(114,25);
+}
+
 void presentDisplay() {
-  static uint8_t cleanFrame[BUFFER_SIZE];
+  static uint8_t cleanFrame[BUFFER_SIZE], effectFrame[BUFFER_SIZE];
   static bool scheduled = false, active = false;
-  static uint32_t nextAt = 0, began = 0, duration = 0;
+  static uint32_t nextAt = 0, began = 0;
   uint32_t now = millis();
   auto schedule = [&]() {
-    nextAt = now + GLITCH_MIN_INTERVAL_MS +
-      esp_random() % (GLITCH_MAX_INTERVAL_MS - GLITCH_MIN_INTERVAL_MS + 1);
+    nextAt = now + GLITCH_MIN_INTERVAL_MS + esp_random() % (GLITCH_MAX_INTERVAL_MS - GLITCH_MIN_INTERVAL_MS + 1);
     scheduled = true;
   };
-  // Keep due alarms and completed timers clearly readable.
-  if (timeAlertVisible()) {
+  // Alerts and setup credentials always stay readable.
+  if (timeAlertVisible() || setupPortalActive) {
     active = false; schedule(); oled.sendBuffer(); return;
   }
   if (!scheduled) schedule();
-  if (!active && (int32_t)(now-nextAt) >= 0) {
-    active = true; began = now; duration = 150 + esp_random()%121;
-  }
-  if (active && (uint32_t)(now-began) >= duration) {
-    active = false; schedule();
-  }
+  if (!active && (int32_t)(now-nextAt) >= 0) { active = true; began = now; }
+  const uint32_t age = now-began;
+  if (active && age >= 1220) { active = false; schedule(); }
   if (!active) { oled.sendBuffer(); return; }
 
   uint8_t *pixels = oled.getBufferPtr();
-  memcpy(cleanFrame, pixels, BUFFER_SIZE);
-  int band = 1 + esp_random()%6;
-  int shift = (int)(esp_random()%11)-5;
-  if (shift == 0) shift = 3;
-  for (int x=0; x<128; ++x) {
-    pixels[band*128+x] = cleanFrame[band*128+(x-shift+128)%128];
-    int other = (band+3)%8;
-    pixels[other*128+x] = cleanFrame[other*128+(x+shift+128)%128];
+  memcpy(cleanFrame,pixels,BUFFER_SIZE);
+  // 0-120ms tearing, 120-1120ms evil face, 100ms exit tearing.
+  if (age >= 120 && age < 1120) drawEvilGlitchFace(age-120);
+  memcpy(effectFrame,pixels,BUFFER_SIZE);
+  bool tear = age < 120 || age >= 1120 || (age%240 < 45);
+  if (tear) {
+    int band = 1 + esp_random()%6;
+    int shift = (int)(esp_random()%11)-5;
+    if (!shift) shift = 3;
+    for (int x=0; x<128; ++x) {
+      pixels[band*128+x] = effectFrame[band*128+(x-shift+128)%128];
+      int other = (band+3)%8;
+      pixels[other*128+x] = effectFrame[other*128+(x+shift+128)%128];
+    }
+    for(int i=0;i<12;++i) pixels[esp_random()%BUFFER_SIZE] ^= (uint8_t)(1U<<(esp_random()%8));
   }
-  int y = 8 + esp_random()%48;
-  int start = 8 + esp_random()%48;
-  for(int x=start; x<start+32; ++x) pixels[(y/8)*128+x] ^= (uint8_t)(1U<<(y%8));
-  for(int i=0; i<9; ++i) pixels[esp_random()%BUFFER_SIZE] ^= (uint8_t)(1U<<(esp_random()%8));
   oled.sendBuffer();
-  memcpy(pixels, cleanFrame, BUFFER_SIZE);
+  // Restore the actual current screen, including transitions running underneath.
+  memcpy(pixels,cleanFrame,BUFFER_SIZE);
 }
 
 // 8x8 ordered dither matrix for smooth dissolve
@@ -248,9 +275,10 @@ void sleepyEyes()
   oled.drawBox(30, 50, 20, 3);
   oled.drawBox(78, 50, 20, 3);
   oled.setFont(u8g2_font_5x7_tr);
-  oled.drawStr(104, 30, "z");
-  oled.drawStr(109, 23, "z");
-  oled.drawStr(114, 16, "Z");
+  int drift = (int)(2*sinf(millis()/850.0f));
+  oled.drawStr(104, 30-drift, "z");
+  oled.drawStr(109, 23-drift, "z");
+  oled.drawStr(114, 16-drift, "Z");
 }
 
 void curiousEyes()
@@ -340,6 +368,25 @@ void uwuMouth()
 // FACE RENDERER
 // ==========================================
 
+void expressiveBrows(Mood mood, bool speaking) {
+  float t = millis()/1000.0f;
+  int left = (int)lroundf(sinf(t*(speaking?11.0f:1.7f))*(speaking?2.0f:1.0f));
+  int right = (int)lroundf(sinf(t*(speaking?9.0f:1.4f)+1.0f)*(speaking?2.0f:1.0f));
+  int y = mood == SLEEPY ? 34 : ((mood == SHY || mood == BLUSH || mood == UNKNOWN || mood == UWU) ? 14 : 6);
+  if (mood == ANGRY) {
+    oled.setDrawColor(0); oled.drawBox(17,6,94,18); oled.setDrawColor(1);
+    curve(20,14+left,36,17+left,51,23+right,2);
+    curve(77,23+left,93,17+right,108,14+right,2);
+  } else if (mood == SAD) {
+    curve(23,22+left,36,15+left,49,13+right,2);
+    curve(79,13+left,92,15+right,105,22+right,2);
+  } else {
+    curve(25,y+left+1,36,y+left-2,47,y+left,2);
+    int ry = mood == CURIOUS ? y+6 : y;
+    curve(81,ry+right,92,ry+right-2,103,ry+right+1,2);
+  }
+}
+
 void renderFace(Mood mood, bool blink = false)
 {
   oled.clearBuffer();
@@ -411,7 +458,15 @@ void renderFace(Mood mood, bool blink = false)
     break;
   }
   if (speakingUntil != 0 && (long)(speakingUntil - millis()) <= 0) speakingUntil = 0;
-  if (speakingUntil != 0 && (long)(speakingUntil - millis()) > 0) {
+  bool speaking = speakingUntil != 0 && (long)(speakingUntil - millis()) > 0;
+  expressiveBrows(mood, speaking);
+  if (mood == THINKING && !speaking) {
+    for(int i=0;i<3;++i) {
+      if(i == (int)((millis()/420)%3)) oled.drawDisc(57+i*7,59,1);
+      else oled.drawPixel(57+i*7,59);
+    }
+  }
+  if (speaking) {
     oled.setDrawColor(0);
     oled.drawBox(51, 46, 27, 18);
     oled.setDrawColor(1);
@@ -583,6 +638,13 @@ void updateAnimation()
     lastBlink = now;
   }
 
+  if (!transitioning && !blinking && !setupPortalActive &&
+      (speakingUntil == 0 || (int32_t)(speakingUntil-millis()) <= 0) &&
+      (!userHasControlledFace || now-lastUserActivity >= 60000) && now-lastDemoFace >= 8000) {
+    lastDemoFace = now;
+    beginTransition((Mood)(((int)currentMood+1)%MOOD_COUNT));
+    return;
+  }
   renderFace(currentMood, blinking);
   drawTimerBadge();
   presentDisplay();
@@ -864,6 +926,7 @@ void handleMood()
   dashboardMode = false;
   stopwatchMode = false;
   speakingUntil = 0;
+  noteUserActivity();
   beginTransition((Mood)selected);
 
   String json = "{\"success\":true,\"mood\":\"";
@@ -1008,7 +1071,9 @@ bool drawExtraTimeScreen() {
     oled.drawRFrame(3,3,122,58,7);
     oled.drawStr(45,16,"ALARM");
     oled.drawCircle(64,31,9); oled.drawLine(64,25,64,32); oled.drawLine(64,32,70,35);
-    oled.drawDisc(64,45,1);
+    int pulse = (int)((millis()/650)%3);
+    oled.drawCircle(64,31,12+pulse);
+    oled.drawDisc(64,47,1);
     oled.drawStr(14,57,"DISMISS IN THE APP");
   } else {
     uint32_t elapsed=stopwatchElapsed();
@@ -1021,6 +1086,11 @@ bool drawExtraTimeScreen() {
     oled.setFont(u8g2_font_5x7_tr); snprintf(value,sizeof(value),".%02lu",(elapsed/10)%100);
     oled.drawStr(56,49,value);
     oled.drawHLine(15,54,98); oled.drawStr(44,63,stopwatchRunning && elapsed<359999990UL?"RUNNING":"PAUSED");
+    oled.drawLine(3,18,3,30); oled.drawLine(124,18,124,30);
+    if(stopwatchRunning) {
+      int tick=(millis()/160)%10;
+      oled.drawPixel(3,33+tick); oled.drawPixel(124,42-tick);
+    }
     if(stopwatchRunning) oled.drawDisc(16+(millis()/60)%96,54,1);
   }
   return true;
@@ -1039,6 +1109,10 @@ void drawTimerScreen() {
   oled.setFont(remaining >= 3600000 ? u8g2_font_logisoso16_tn : u8g2_font_logisoso24_tn);
   oled.drawStr((128 - oled.getStrWidth(text))/2, 43, text);
   oled.drawRFrame(14, 53, 100, 5, 2);
+  if (remaining > 0) {
+    int tick = (millis()/180)%7;
+    oled.drawVLine(3,25+tick,3); oled.drawVLine(124,31-tick,3);
+  }
   int fill = remaining == 0 ? 98 : constrain((int)(98.0 * remaining / timerDurationMs), 0, 98);
   if (fill > 0) oled.drawBox(15, 54, fill, 3);
   // A quiet orbiting dot; finished timers stay steady instead of flashing.
@@ -1061,87 +1135,139 @@ void drawTimerBadge() {
 
 void drawDashboard() {
   oled.clearBuffer(); oled.setDrawColor(1);
-  oled.drawFrame(0, 0, 128, 64);
-  oled.drawHLine(0, 12, 128);
-  oled.drawVLine(83, 13, 43);
+  oled.drawRFrame(0, 0, 128, 64, 4);
+  int comet = 5 + (millis()/75)%116;
+  oled.drawHLine(max(4,comet-5),2,min(6,comet-3));
+  oled.drawHLine(3, 12, 122);
+  oled.drawVLine(85, 16, 37);
+  oled.drawHLine(3, 55, 122);
   oled.setFont(u8g2_font_5x7_tr);
+  int second = (millis()/1000)%60;
   if (displayState.epoch) {
     time_t epoch = displayState.epoch + (millis()-clockReceived)/1000 + displayState.utcOffset*60;
     struct tm current; gmtime_r(&epoch, &current);
+    second = current.tm_sec;
     char date[24], clock[8];
     strftime(date, sizeof(date), "%a %d %b", &current);
     strftime(clock, sizeof(clock), "%H:%M", &current);
-    oled.drawStr(4, 9, date);
+    oled.drawStr(5, 9, date);
     oled.setFont(u8g2_font_logisoso24_tn);
-    oled.drawStr(3, 43, clock);
+    oled.drawStr(4, 40, clock);
+    // Twelve quiet second markers make the clock feel alive without flashing it.
+    for (int i = 0; i < 12; ++i) {
+      if (i <= second/5) oled.drawBox(7+i*6, 43, 3, 1);
+      else oled.drawPixel(8+i*6, 43);
+    }
   } else {
-    oled.drawStr(4, 9, "EDITH DASHBOARD");
-    oled.drawStr(6, 35, "Sync clock...");
+    oled.drawStr(5, 9, "EDITH / REST");
+    oled.drawStr(7, 33, "Syncing...");
   }
-  if (WiFi.status() == WL_CONNECTED) oled.drawDisc(121, 6, 2);
-  else oled.drawCircle(121, 6, 2);
+  // Crescent + connection indicator, with no invented battery percentage.
+  oled.drawDisc(105, 6, 3); oled.setDrawColor(0); oled.drawDisc(107, 5, 3); oled.setDrawColor(1);
+  for (int i = 0; i < 3; ++i) {
+    if (WiFi.status() == WL_CONNECTED) oled.drawBox(115+i*3, 9-(i+1)*2, 2, (i+1)*2);
+    else oled.drawPixel(115+i*3, 8);
+  }
   oled.setFont(u8g2_font_5x7_tr);
   if (displayState.weatherAge >= 0 && displayState.weatherCode >= 0) {
-    bool clear = displayState.weatherCode <= 1;
-    if (clear) {
-      oled.drawCircle(105, 22, 5);
-      oled.drawLine(105,14,105,16); oled.drawLine(105,28,105,30);
-      oled.drawLine(97,22,99,22); oled.drawLine(111,22,113,22);
+    int code = displayState.weatherCode;
+    if (code <= 1) {
+      oled.drawCircle(106, 22, 5);
+      oled.drawLine(106,14,106,16); oled.drawLine(106,28,106,30);
+      oled.drawLine(98,22,100,22); oled.drawLine(112,22,114,22);
+      oled.drawPixel(100,16); oled.drawPixel(112,16);
+      oled.drawPixel(100,28); oled.drawPixel(112,28);
+      float sunshine = millis()/1800.0f;
+      oled.drawPixel(106+(int)(8*cosf(sunshine)),22+(int)(8*sinf(sunshine)));
     } else {
-      oled.drawCircle(102,23,4); oled.drawCircle(108,21,5); oled.drawHLine(98,27,16);
-      if (displayState.weatherCode >= 51) {
-        oled.drawLine(101,29,100,32); oled.drawLine(109,29,108,32);
+      int breeze = (int)lroundf(sinf(millis()/1400.0f));
+      oled.drawCircle(101+breeze,23,4); oled.drawCircle(108+breeze,21,5); oled.drawHLine(97+breeze,27,17);
+      if (code == 45 || code == 48) { oled.drawHLine(97,29,17); oled.drawHLine(100,31,13); }
+      else if (code >= 71 && code <= 77) {
+        oled.drawLine(101,29,101,33); oled.drawHLine(99,31,5); oled.drawPixel(111,31);
+      } else if (code >= 95) {
+        oled.drawLine(108,28,104,31); oled.drawLine(104,31,108,31); oled.drawLine(108,31,105,34);
+      } else if (code >= 51) {
+        int rain = (millis()/220)%3;
+        oled.drawLine(101,28+rain,100,30+rain); oled.drawLine(110,30-rain,109,32-rain);
       }
     }
     char temperature[12], humidity[12];
     snprintf(temperature, sizeof(temperature), "%.1fC", displayState.temperature10/10.0);
     snprintf(humidity, sizeof(humidity), "RH %d%%", displayState.humidity);
-    oled.drawStr(87, 42, temperature); oled.drawStr(87, 52, humidity);
-    if (displayState.weatherAge + (int)((millis()-clockReceived)/1000) > 1800)
-      oled.drawStr(119, 21, "*");
-  } else {
-    oled.drawStr(88, 28, "WEATHER"); oled.drawStr(88, 41, "--");
-  }
+    oled.setClipWindow(88, 34, 126, 54);
+    oled.drawStr(89, 42, temperature); oled.drawStr(89, 52, humidity);
+    oled.setMaxClipWindow();
+    if (displayState.weatherAge + (int)((millis()-clockReceived)/1000) > 1800) oled.drawStr(120, 21, "*");
+  } else { oled.drawStr(94, 30, "--"); oled.setFont(u8g2_font_4x6_tr); oled.drawStr(90, 44, "NO DATA"); }
   oled.setFont(u8g2_font_4x6_tr);
-  oled.drawStr(4, 53, displayState.city[0] ? displayState.city : "Set city in UI");
-  oled.drawHLine(1, 56, 126);
-  oled.setFont(u8g2_font_5x7_tr);
-  if (timerPresent) {
-    char timer[16]; formatTimer(timer, sizeof(timer));
-    oled.drawStr(4, 63, remainingTimer() == 0 ? "TIME UP!" : "TIMER");
-    if (remainingTimer() > 0) oled.drawStr(58, 63, timer);
-    else if ((millis()/500)%2) oled.drawFrame(0,0,128,64);
-  } else if(alarmPresent) {
-    int32_t seconds=max((int32_t)0,(int32_t)(alarmEnd-millis()))/1000;
-    char alarm[24]; snprintf(alarm,sizeof(alarm),"ALARM IN %02ld:%02ld",(long)seconds/3600,(long)(seconds/60)%60);
-    oled.drawStr(4,63,alarm);
-  } else oled.drawStr(4, 63, "RESTING  z z z");
+  oled.setClipWindow(5, 46, 83, 54);
+  const char *city = displayState.city[0] ? displayState.city : "Set weather city";
+  int overflow = max(0, (int)oled.getStrWidth(city)-76);
+  int cityOffset = 0;
+  if(overflow > 0) {
+    // Pause at each end, then slide slowly. Long city names become readable.
+    uint32_t travel = overflow*90UL;
+    uint32_t cycle = 3000UL+2*travel;
+    uint32_t position = millis()%cycle;
+    if(position >= 1500 && position < 1500+travel) cityOffset=(position-1500)/90;
+    else if(position >= 1500+travel && position < 3000+travel) cityOffset=overflow;
+    else if(position >= 3000+travel) cityOffset=overflow-(position-3000-travel)/90;
+  }
+  // This font advances four pixels per character. Keep x nonnegative for U8g2.
+  oled.drawStr(5-cityOffset%4, 52, city+cityOffset/4);
+  oled.setMaxClipWindow();
+  if (alarmPresent) {
+    int32_t seconds = max((int32_t)0, (int32_t)(alarmEnd-millis()))/1000;
+    char alarm[25]; snprintf(alarm, sizeof(alarm), "ALARM IN %02ld:%02ld", (long)seconds/3600, (long)(seconds/60)%60);
+    oled.drawStr(5, 62, alarm);
+  } else {
+    oled.drawStr(5, 62, "REST MODE");
+    const int phase = (millis()/1200)%3;
+    for (int i = 0; i < 3; ++i) {
+      if (i == phase) oled.drawDisc(108+i*6, 60, 1);
+      else oled.drawPixel(108+i*6, 60);
+    }
+  }
 }
 
 void cloudWorker(void *) {
-  String origin = EDITH_SERVER_URL;
-  while (origin.endsWith("/")) origin.remove(origin.length() - 1);
-  bool tls = origin.startsWith("https://");
-  if ((!tls && !(EDITH_ALLOW_HTTP_TEST && origin.startsWith("http://"))) ||
-      strlen(EDITH_DEVICE_TOKEN) < 32 || (tls && strlen(EDITH_ROOT_CA) < 100)) {
-    Serial.println("Cloud configuration incomplete; animation remains active.");
+  String origins[2] = {savedConnection.origin, savedConnection.origin2};
+  String tokens[2] = {savedConnection.token, savedConnection.token2};
+  bool valid[2] = {false,false};
+  for(int i=0;i<2;++i) {
+    while(origins[i].endsWith("/")) origins[i].remove(origins[i].length()-1);
+    valid[i] = validBackendOrigin(origins[i]) && tokens[i].length() >= 32;
+    for(size_t j=0;j<tokens[i].length();++j)
+      if((unsigned char)tokens[i][j]<=32 || (unsigned char)tokens[i][j]>=127) valid[i]=false;
+  }
+  if (!valid[0] && !valid[1]) {
+    Serial.println("No valid backend configured; hold BOOT to configure.");
     vTaskDelete(nullptr); return;
   }
+  int selected = valid[0] ? 0 : 1;
+  unsigned int failures = 0;
   unsigned long waitMs = 1500;
   for (;;) {
     bool success = false;
-    if (WiFi.status() == WL_CONNECTED && (!tls || time(nullptr) > 1700000000)) {
+    bool connected = WiFi.status() == WL_CONNECTED;
+    bool tls = origins[selected].startsWith("https://");
+    if (connected) {
+      // An unsynchronised TLS clock also counts toward fallback, so a local
+      // HTTP secondary can still work when there is no internet/NTP access.
+      if (!tls || time(nullptr) > 1700000000) {
       CloudSnapshot report = {};
       xQueuePeek(cloudReports, &report, 0);
-      WiFiClient plain;
-      WiFiClientSecure secure;
+      WiFiClient plain; WiFiClientSecure secure;
       if (tls) secure.setCACert(EDITH_ROOT_CA);
       HTTPClient http;
       http.setConnectTimeout(3000); http.setTimeout(5000); http.setReuse(false);
-      bool started = tls ? http.begin(secure, origin + "/api/device/poll-v2")
-                         : http.begin(plain, origin + "/api/device/poll-v2");
+      http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+      bool started = tls ? http.begin(secure, origins[selected] + "/api/device/poll-v2")
+                         : http.begin(plain, origins[selected] + "/api/device/poll-v2");
       if (started) {
-        http.addHeader("Authorization", String("Bearer ") + EDITH_DEVICE_TOKEN);
+        // A URL is always tried with its own token; never try another token here.
+        http.addHeader("Authorization", String("Bearer ") + tokens[selected]);
         http.addHeader("X-Edith-Ack", report.id);
         http.addHeader("X-Edith-Mood", moodNames[report.mood]);
         http.addHeader("X-Edith-Mode", report.stopwatch ? "stopwatch" : (report.dashboard ? "dashboard" : "face"));
@@ -1154,8 +1280,13 @@ void cloudWorker(void *) {
         }
       }
       http.end();
+      }
+      if (success) { failures = 0; waitMs = 1500; }
+      else if (++failures >= 3 && valid[1-selected]) {
+        selected = 1-selected; failures = 0; waitMs = 1500;
+        Serial.print("Trying backend slot "); Serial.println(selected+1);
+      } else waitMs = min(waitMs*2,15000UL);
     }
-    waitMs = success ? 1500 : min(waitMs*2, 30000UL);
     vTaskDelay(pdMS_TO_TICKS(waitMs));
   }
 }
@@ -1187,6 +1318,9 @@ void updateCloud() {
   CloudSnapshot command;
   if (xQueueReceive(cloudCommands, &command, 0) == pdTRUE) {
     bool wake = (dashboardMode || stopwatchMode) && !command.dashboard && !command.stopwatch;
+    if ((command.id[0] != '-' && strcmp(appliedCloudId, command.id)) ||
+        (command.speechMs > 0 && strcmp(activeSpeechId,command.speechId)) || dashboardMode != command.dashboard || stopwatchMode != command.stopwatch)
+      noteUserActivity();
     dashboardMode = command.dashboard;
     stopwatchMode = command.stopwatch;
     uint32_t currentSw = stopwatchElapsed();
@@ -1237,15 +1371,19 @@ void updateCloud() {
 
 void connectWiFi()
 {
+  loadConnectionSettings();
+  if (EDITH_SETUP_BUTTON_PIN >= 0) pinMode(EDITH_SETUP_BUTTON_PIN, INPUT_PULLUP);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  tryWifiProfile();
 
   Serial.println("EDITH connecting to Wi-Fi...");
 }
 
 void checkWiFi()
 {
+  // Keep the setup AP channel stable while a phone is entering settings.
+  if (setupPortalActive) return;
   if (WiFi.status() == WL_CONNECTED)
   {
     return;
@@ -1256,7 +1394,11 @@ void checkWiFi()
   if (now - lastWiFiRetry >= WIFI_RETRY_TIME)
   {
     lastWiFiRetry = now;
-    WiFi.reconnect();
+    if (millis() - wifiAttemptAt >= 12000) {
+      if (savedConnection.count) wifiProfile = (wifiProfile + 1) % savedConnection.count;
+      WiFi.disconnect();
+      tryWifiProfile();
+    }
   }
 }
 
@@ -1277,7 +1419,7 @@ void setup()
   oled.sendBuffer();
 
   if (EDITH_LOCAL_HTTP_ENABLED) {
-  server.on("/", HTTP_GET, handleHome);
+
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/mood", HTTP_GET, handleMood);
   server.on("/companion", HTTP_POST, handleCompanion);
@@ -1291,7 +1433,13 @@ void setup()
   } // local HTTP routes
 
   connectWiFi();
-  if (EDITH_LOCAL_HTTP_ENABLED) server.begin();
+  installSetupRoutes();
+  server.on("/", HTTP_GET, []() {
+    if (setupPortalActive && server.client().localIP() == WiFi.softAPIP()) handleSetupPage();
+    else if (EDITH_LOCAL_HTTP_ENABLED) handleHome();
+    else server.send(404, "text/plain", "Hold BOOT for 3 seconds to open setup Wi-Fi.");
+  });
+  server.begin();
   beginCompanion();
 
   lastBlink = millis();
@@ -1306,17 +1454,17 @@ void setup()
 void loop()
 {
   // Handle requests without blocking animations
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    if (EDITH_LOCAL_HTTP_ENABLED) server.handleClient();
-  }
-
+  if (WiFi.status() == WL_CONNECTED || setupPortalActive) server.handleClient();
+  serviceSetupPortal();
   checkWiFi();
 
   updateCloud();
 
   // Keep face updating independently
-  updateAnimation();
+  if (setupPortalActive) {
+    static uint32_t lastSetupFrame = 0;
+    if (millis() - lastSetupFrame >= 100) { lastSetupFrame = millis(); drawSetupScreen(); }
+  } else updateAnimation();
   delay(1);
 
   // Print connected IP

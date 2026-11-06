@@ -2,6 +2,14 @@
 
 Cross-platform PlatformIO project for the ESP32-S3 firmware of EDITH. Drives a 128x64 SH1106 OLED with eleven expressions, blinking and smooth dissolve transitions. Supports local HTTP control and outward authenticated polling of the companion backend.
 
+### ✨ Living OLED
+
+- Speech animates the mouth and raises/tilts the eyebrows; idle brows move gently too.
+- Sleep includes drifting Zs. Thinking has moving dots. Weather has drifting clouds, falling rain and a sun sparkle; long city names scroll slowly.
+- Timer and stopwatch screens have moving edge accents. The sleep dashboard and setup page have quiet scanning accents.
+- Every 25–70 seconds, a short glitch reveals an evil grin for one second before restoring the current screen. This is a temporary visual effect, not a new selectable mood. Timer/stopwatch timekeeping, speech and device acknowledgements continue underneath.
+- Due alarms, completed timers and setup credentials are protected from the glitch. Alerts remain readable.
+
 Build and upload from Windows 11 or Linux, including CachyOS/KDE. PlatformIO downloads the compiler for the host operating system; the firmware still runs on the same ESP32. No Windows drive letters or COM ports are hardcoded in the project.
 
 ## 🔧 Hardware
@@ -10,9 +18,112 @@ Build and upload from Windows 11 or Linux, including CachyOS/KDE. PlatformIO dow
 - SH1106 128x64 I2C OLED
 - SDA: GPIO 8; SCL: GPIO 9
 
+## 📶 Change Wi-Fi or backend without reflashing
+
+After one firmware update, hold **BOOT for 3 seconds while EDITH is running**. Join the `EDITH-Setup-XXXX` Wi-Fi using the temporary key on the OLED, then open **http://192.168.4.1**. Enter your Wi-Fi and Python backend address, save, and EDITH restarts. It remembers up to three networks and the backend address across restarts. Setup opens **only** by holding BOOT; it never appears automatically on startup or Wi-Fi failure.
+
+Read the [📘 setup and mobile-hotspot guide](SETUP.md) for Windows/Linux commands, password handling, recovery and a first hardware check. The Android app's backend URL is changed separately. Holding BOOT during power-on/reset enters flashing mode, so activate setup **after** EDITH has started.
+
 Match your board's flash/PSRAM specifications to `platformio.ini`; different ESP32-S3 boards have different memory. Build, upload and local polling have been verified on Windows with the ESP32. Linux build/upload still needs hardware verification.
 
+## 📱 Use EDITH with your laptop and phone hotspot — simple steps
+
+**EDITH's setup Wi-Fi is only for entering settings. Once finished, the laptop and EDITH both connect to your phone hotspot. The laptop then has internet access for Gemini.**
+
+### 1. Connect the laptop to your phone
+
+Turn on mobile data and your phone's **Wi-Fi hotspot**. Select **2.4 GHz** in the hotspot settings if there is a band option. Note the hotspot's name and password.
+
+On the laptop, click the Wi-Fi icon, choose your phone's hotspot name, enter its password, and connect. Open a website to check that the laptop has internet.
+
+### 2. Find the laptop's IP address
+
+**Windows:** press **Win + R**, type `cmd`, and press Enter. In the window, type:
+
+```powershell
+ipconfig
+```
+
+Find **Wireless LAN adapter Wi-Fi**, then its **IPv4 Address** line. For example:
+
+```text
+Wireless LAN adapter Wi-Fi:
+   IPv4 Address . . . . . . . . . . : 192.168.43.120
+   Default Gateway . . . . . . . . : 192.168.43.1
+```
+
+Write down **192.168.43.120** in this example. Yours will probably be different—use yours! Do **not** use Default Gateway, a VPN adapter, or an address from EDITH's setup Wi-Fi.
+
+**Linux / CachyOS KDE:** open **Konsole** and type:
+
+```bash
+ip -4 address
+```
+
+Find your connected Wi-Fi interface (often named `wlan0` or starting with `wlp`). Its `inet` line might show `192.168.43.120/24`. Write down `192.168.43.120`, leaving off `/24`. Ignore `lo`, `127.0.0.1`, VPN and virtual interfaces.
+
+### 3. Start the Python backend on the laptop
+
+Open the backend project in VS Code, open its terminal, and run:
+
+```bash
+uv run python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Leave that terminal running. Keep your working Gemini API settings in the backend's private `.env`. If using LM Studio instead, keep LM Studio and its model server running too.
+
+The backend address is **`http://` + your laptop's IPv4 address + `:8000`**. With the example above, it is:
+
+```text
+http://192.168.43.120:8000
+```
+
+Open `http://YOUR-LAPTOP-IP:8000/healthz` in the laptop's browser to check that the backend responds. Connections from EDITH also need incoming TCP port **8000** allowed through the laptop firewall on your trusted hotspot network.
+
+### 4. Tell EDITH which network and backend to use
+
+After the updated firmware has been uploaded once, power EDITH normally. **While it is already running**, hold its **BOOT** button for **3 seconds**, then release. Do not hold BOOT during power-on/reset.
+
+The OLED shows an **EDITH-Setup-XXXX** network, a temporary **KEY**, and a setup IP. On the laptop, temporarily disconnect from your phone's hotspot and join **EDITH-Setup-XXXX** using that key. Internet access will stop briefly; this is expected.
+
+Open the IP shown on the OLED in your browser—normally **http://192.168.4.1**—and fill in:
+
+| Field | What to enter |
+| --- | --- |
+| Wi-Fi name | Your **phone hotspot's name**, not EDITH-Setup |
+| Wi-Fi password | Your **phone hotspot's password**, not the temporary OLED key |
+| Python backend address | `http://YOUR-LAPTOP-IP:8000`, using the address you wrote down in step 2 |
+| Device token | Leave blank to keep your existing working token |
+
+Click **Save & restart EDITH**. You do not need to upload firmware again when changing these settings.
+
+### 5. Reconnect the laptop to your phone hotspot
+
+After saving, select your **phone hotspot** from the laptop's Wi-Fi list and reconnect. EDITH will join that hotspot too. Your laptop now has internet access again, so the backend can call Gemini.
+
+Run `ipconfig` (Windows) or `ip -4 address` (Linux) again. If the laptop's Wi-Fi IPv4 address changed, repeat step 4 with the new address.
+
+You can also configure EDITH from another device while the laptop stays on the hotspot. If you use the phone providing the hotspot to join EDITH-Setup, the phone may turn its hotspot off; turn it back on after saving and reconnect the laptop.
+
+### 6. Connect the Android app
+
+In EDITH Android, open **Settings**, enter that same backend address (`http://YOUR-LAPTOP-IP:8000`), enter your existing web username/password, and tap **Save & connect**. Try changing a face from Controls.
+
+The final arrangement is:
+
+```text
+Phone hotspot supplies internet
+  ├── Laptop: Python backend → Gemini API
+  └── ESP: connects to the laptop's backend
+```
+
+The laptop must stay awake with the backend running. Some hotspots block devices from talking to one another; if the app/ESP cannot connect, test `http://YOUR-LAPTOP-IP:8000/healthz` from another connected device and check the laptop firewall and hotspot's device-isolation setting. A check on the laptop alone does not prove other devices can reach it.
+
+The firmware must use polling mode (`EDITH_CLOUD_ENABLED=1`) and allow local HTTP (`EDITH_ALLOW_HTTP_TEST=1`); both are already enabled in the author's working setup. The ESP's device token must match the backend's `EDITH_DEVICE_TOKEN`.
+
 ## 🚀 Quick start
+
+Already using EDITH? See [📶 Change Wi-Fi or backend without reflashing](#-change-wi-fi-or-backend-without-reflashing) above. Your existing private config remains the first-boot default.
 
 **You need:** [Git](https://git-scm.com/downloads), [VS Code](https://code.visualstudio.com/) with the [PlatformIO IDE extension](https://platformio.org/install/ide?install=vscode), an ESP32-S3 and a data-capable USB cable.
 
@@ -240,4 +351,22 @@ Start/resume, pause/reset a stopwatch, or set/dismiss a one-time alarm from Andr
 Alarms are visual only; speaker output is not implemented. Power loss needs a backend reconnection to restore state. Due alarms stay visible until dismissed in the app/web controls. The optional TOOLS1 extension adds six fields to the original v2 snapshot, while this firmware also accepts old 16-field snapshots.
 
 ## 📺 Ambient OLED glitches
-During normal operation, a brief cosmetic glitch occurs every 25–70 seconds (150–270 ms). Shifted scan bands and a few noise pixels affect only the transmitted frame; the clean buffer is restored immediately. It adds no delays and leaves face/timer state intact. Due alarms and finished timer alerts suppress the effect. Adjust GLITCH_MIN_INTERVAL_MS and GLITCH_MAX_INTERVAL_MS in src/main.cpp to change the frequency.
+During normal operation, a cosmetic glitch occurs every 25–70 seconds, including an evil-face appearance lasting one second. Shifted scan bands and a few noise pixels affect only the transmitted frame; the clean buffer is restored immediately. It adds no delays and leaves face/timer state intact. Due alarms and finished timer alerts suppress the effect. Adjust GLITCH_MIN_INTERVAL_MS and GLITCH_MAX_INTERVAL_MS in src/main.cpp to change the frequency.
+
+## 🏠 Two backends + idle faces
+
+Hold BOOT and open setup. Keep your home backend in **Python backend address** and add the laptop/university backend under **Second backend address**, with that backend's own **Second device token**. Save once. Existing saved Wi-Fi/primary settings are migrated automatically to the new format.
+
+EDITH first tries the primary backend. After three failed polls (network error, failed authentication, or invalid response), it tries the other valid pair. It stays on whichever is working, without constantly switching back. Both servers must be reachable from the current network; two addresses do not make an offline home PC accessible from university. If both are reachable, this is availability-based fallback, not location detection. The Android app still needs the address of the backend you intend to use. Timers/settings on separate backends are not synchronized.
+
+Prefer the setup page for an already configured ESP. For first-boot defaults in your private `include/edith_config.h`, leave your existing primary constants and add:
+
+```cpp
+#define EDITH_SECOND_BACKEND_ENABLED 1
+static const char *EDITH_SERVER_URL_2 = "http://YOUR-LAPTOP-IP:8000";
+static const char *EDITH_DEVICE_TOKEN_2 = "YOUR_SECOND_BACKENDS_DEVICE_TOKEN";
+```
+
+Do not duplicate the primary constant names. Each token must match its own backend's private `EDITH_DEVICE_TOKEN`. Saved portal settings take precedence over header defaults; set the second pair in the portal if settings were already saved in the new format. Local HTTP still requires `EDITH_ALLOW_HTTP_TEST=1`. Both HTTPS hosts must be trusted by `EDITH_ROOT_CA` (a PEM bundle can contain multiple roots); certificate verification remains enabled and redirects are disabled.
+
+When left alone after startup, EDITH dissolves to the next of its eleven faces about every **8 seconds**. An app face/chat command pauses the idle rotation for **60 seconds**. Speech, dashboards, stopwatches, active/completed timers and due alarms take priority. The idle rotation never opens setup. The evil face remains a temporary glitch effect rather than a selectable mood.
